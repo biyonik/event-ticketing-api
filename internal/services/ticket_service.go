@@ -9,6 +9,8 @@ import (
 	"github.com/biyonik/event-ticketing-api/internal/patterns/factory"
 	"github.com/biyonik/event-ticketing-api/internal/patterns/observer"
 	"github.com/biyonik/event-ticketing-api/internal/repositories"
+	v "github.com/biyonik/event-ticketing-api/pkg/validation"
+	"github.com/biyonik/event-ticketing-api/pkg/validation/types"
 )
 
 type TicketService struct {
@@ -41,13 +43,47 @@ func NewTicketService(
 
 // ReserveTicket reserves a ticket for a limited time
 func (s *TicketService) ReserveTicket(userID, eventID, sectionID int64, seatID *int64, price float64) (*models.Ticket, error) {
-	// 1. Validate event
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"user_id": types.Number().
+			Required().
+			Min(1).
+			Label("Kullanıcı ID"),
+		"event_id": types.Number().
+			Required().
+			Min(1).
+			Label("Etkinlik ID"),
+		"section_id": types.Number().
+			Required().
+			Min(1).
+			Label("Bölüm ID"),
+		"price": types.Number().
+			Required().
+			Min(0.01).
+			Label("Fiyat"),
+	})
+
+	rawData := map[string]any{
+		"user_id":    float64(userID),
+		"event_id":   float64(eventID),
+		"section_id": float64(sectionID),
+		"price":      price,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return nil, fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Validate event
 	event, err := s.eventRepo.FindByID(eventID)
 	if err != nil {
 		return nil, fmt.Errorf("etkinlik bulunamadı: %w", err)
 	}
 
-	// 2. Business rules
+	// 3. Business rules
 	if !event.IsSaleActive() {
 		return nil, fmt.Errorf("bilet satışı aktif değil")
 	}
@@ -56,7 +92,7 @@ func (s *TicketService) ReserveTicket(userID, eventID, sectionID int64, seatID *
 		return nil, fmt.Errorf("etkinlik tükendi")
 	}
 
-	// 3. Check seat availability if specific seat requested
+	// 4. Check seat availability if specific seat requested
 	if seatID != nil {
 		isTaken, err := s.ticketRepo.IsSeatTaken(eventID, *seatID)
 		if err != nil {
@@ -67,19 +103,19 @@ func (s *TicketService) ReserveTicket(userID, eventID, sectionID int64, seatID *
 		}
 	}
 
-	// 4. Start transaction to prevent double booking
+	// 5. Start transaction to prevent double booking
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("transaction başlatılamadı: %w", err)
 	}
 	defer tx.Rollback()
 
-	// 5. Decrement available seats
+	// 6. Decrement available seats
 	if err := s.eventRepo.DecrementAvailableSeats(eventID, 1); err != nil {
 		return nil, fmt.Errorf("koltuk rezervasyonu yapılamadı: %w", err)
 	}
 
-	// 6. Get venue and section info for ticket
+	// 7. Get venue and section info for ticket
 	venue, err := s.venueRepo.FindByID(event.VenueID)
 	if err != nil {
 		return nil, fmt.Errorf("mekan bulunamadı: %w", err)
@@ -99,7 +135,7 @@ func (s *TicketService) ReserveTicket(userID, eventID, sectionID int64, seatID *
 		seatInfo = fmt.Sprintf("%s - Sıra: %s, Koltuk: %s", section.Name, seat.Row, seat.Number)
 	}
 
-	// 7. Create ticket using Factory pattern
+	// 8. Create ticket using Factory pattern
 	ticketReq := &factory.TicketCreationRequest{
 		EventID:    eventID,
 		UserID:     userID,
@@ -117,14 +153,14 @@ func (s *TicketService) ReserveTicket(userID, eventID, sectionID int64, seatID *
 		return nil, fmt.Errorf("bilet oluşturulamadı: %w", err)
 	}
 
-	// 8. Save ticket to database
+	// 9. Save ticket to database
 	ticketID, err := s.ticketRepo.Create(ticket)
 	if err != nil {
 		return nil, fmt.Errorf("bilet kaydedilemedi: %w", err)
 	}
 	ticket.ID = ticketID
 
-	// 9. Commit transaction
+	// 10. Commit transaction
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("transaction commit edilemedi: %w", err)
 	}
@@ -134,28 +170,58 @@ func (s *TicketService) ReserveTicket(userID, eventID, sectionID int64, seatID *
 
 // PurchaseTicket completes a ticket purchase
 func (s *TicketService) PurchaseTicket(ticketID int64, userEmail, userPhone string) error {
-	// 1. Get ticket
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"ticket_id": types.Number().
+			Required().
+			Min(1).
+			Label("Bilet ID"),
+		"user_email": types.String().
+			Required().
+			Email().
+			Label("E-posta"),
+		"user_phone": types.String().
+			Required().
+			Min(10).
+			Max(15).
+			Label("Telefon"),
+	})
+
+	rawData := map[string]any{
+		"ticket_id":  float64(ticketID),
+		"user_email": userEmail,
+		"user_phone": userPhone,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Get ticket
 	ticket, err := s.ticketRepo.FindByID(ticketID)
 	if err != nil {
 		return fmt.Errorf("bilet bulunamadı: %w", err)
 	}
 
-	// 2. Business rules - use State Pattern methods
+	// 3. Business rules - use State Pattern methods
 	if !ticket.CanPurchase() {
 		return fmt.Errorf("bilet satın alınamaz durumda")
 	}
 
-	// 3. Mark as sold
+	// 4. Mark as sold
 	if err := ticket.MarkAsSold(); err != nil {
 		return fmt.Errorf("bilet satış durumuna geçirilemedi: %w", err)
 	}
 
-	// 4. Update in database
+	// 5. Update in database
 	if err := s.ticketRepo.Update(ticket); err != nil {
 		return fmt.Errorf("bilet güncellenemedi: %w", err)
 	}
 
-	// 5. Get event details for notification
+	// 6. Get event details for notification
 	event, err := s.eventRepo.FindByID(ticket.EventID)
 	if err != nil {
 		return fmt.Errorf("etkinlik bulunamadı: %w", err)
@@ -177,7 +243,7 @@ func (s *TicketService) PurchaseTicket(ticketID int64, userEmail, userPhone stri
 		}
 	}
 
-	// 6. Notify observers using Observer pattern
+	// 7. Notify observers using Observer pattern
 	s.eventPublisher.Notify(&observer.EventData{
 		Type:      observer.EventTypeTicketPurchased,
 		Timestamp: time.Now(),
@@ -196,7 +262,7 @@ func (s *TicketService) PurchaseTicket(ticketID int64, userEmail, userPhone stri
 		},
 	})
 
-	// 7. Check if event sold out
+	// 8. Check if event sold out
 	if event.AvailableSeats == 0 {
 		s.eventRepo.UpdateStatus(event.ID, models.EventStatusSoldOut)
 	}
@@ -206,18 +272,42 @@ func (s *TicketService) PurchaseTicket(ticketID int64, userEmail, userPhone stri
 
 // CancelTicket cancels a ticket and refunds
 func (s *TicketService) CancelTicket(ticketID int64, userEmail string) error {
-	// 1. Get ticket
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"ticket_id": types.Number().
+			Required().
+			Min(1).
+			Label("Bilet ID"),
+		"user_email": types.String().
+			Required().
+			Email().
+			Label("E-posta"),
+	})
+
+	rawData := map[string]any{
+		"ticket_id":  float64(ticketID),
+		"user_email": userEmail,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Get ticket
 	ticket, err := s.ticketRepo.FindByID(ticketID)
 	if err != nil {
 		return fmt.Errorf("bilet bulunamadı: %w", err)
 	}
 
-	// 2. Business rules - use State Pattern methods
+	// 3. Business rules - use State Pattern methods
 	if !ticket.CanCancel() {
 		return fmt.Errorf("bilet iptal edilemez durumda")
 	}
 
-	// 3. Get event to check cancellation policy
+	// 4. Get event to check cancellation policy
 	event, err := s.eventRepo.FindByID(ticket.EventID)
 	if err != nil {
 		return fmt.Errorf("etkinlik bulunamadı: %w", err)
@@ -228,22 +318,22 @@ func (s *TicketService) CancelTicket(ticketID int64, userEmail string) error {
 		return fmt.Errorf("etkinlikten 24 saat kala iptal yapılamaz")
 	}
 
-	// 4. Mark as cancelled
+	// 5. Mark as cancelled
 	if err := ticket.MarkAsCancelled(); err != nil {
 		return fmt.Errorf("bilet iptal durumuna geçirilemedi: %w", err)
 	}
 
-	// 5. Update in database
+	// 6. Update in database
 	if err := s.ticketRepo.Update(ticket); err != nil {
 		return fmt.Errorf("bilet güncellenemedi: %w", err)
 	}
 
-	// 6. Increment available seats
+	// 7. Increment available seats
 	if err := s.eventRepo.IncrementAvailableSeats(ticket.EventID, 1); err != nil {
 		return fmt.Errorf("koltuk sayısı artırılamadı: %w", err)
 	}
 
-	// 7. Notify observers
+	// 8. Notify observers
 	s.eventPublisher.Notify(&observer.EventData{
 		Type:      observer.EventTypeTicketCancelled,
 		Timestamp: time.Now(),
@@ -259,23 +349,49 @@ func (s *TicketService) CancelTicket(ticketID int64, userEmail string) error {
 
 // ValidateTicket validates a ticket at venue entrance
 func (s *TicketService) ValidateTicket(ticketNumber, verificationCode string) (*models.Ticket, error) {
-	// 1. Find ticket
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"ticket_number": types.String().
+			Required().
+			Min(10).
+			Max(50).
+			Label("Bilet Numarası"),
+		"verification_code": types.String().
+			Required().
+			Min(6).
+			Max(10).
+			Label("Doğrulama Kodu"),
+	})
+
+	rawData := map[string]any{
+		"ticket_number":     ticketNumber,
+		"verification_code": verificationCode,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return nil, fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Find ticket
 	ticket, err := s.ticketRepo.FindByTicketNumber(ticketNumber)
 	if err != nil {
 		return nil, fmt.Errorf("bilet bulunamadı: %w", err)
 	}
 
-	// 2. Validate verification code
+	// 3. Validate verification code
 	if !s.ticketValidator.ValidateVerificationCode(verificationCode, ticket) {
 		return nil, fmt.Errorf("doğrulama kodu hatalı")
 	}
 
-	// 3. Business rules - use State Pattern methods
+	// 4. Business rules - use State Pattern methods
 	if !ticket.CanUse() {
 		return nil, fmt.Errorf("bilet kullanılamaz durumda: %s", ticket.Status)
 	}
 
-	// 4. Check if ticket already used
+	// 5. Check if ticket already used
 	if ticket.Status == models.TicketStatusUsed {
 		return nil, fmt.Errorf("bilet daha önce kullanılmış")
 	}
@@ -285,28 +401,48 @@ func (s *TicketService) ValidateTicket(ticketNumber, verificationCode string) (*
 
 // UseTicket marks a ticket as used
 func (s *TicketService) UseTicket(ticketNumber string) error {
-	// 1. Find ticket
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"ticket_number": types.String().
+			Required().
+			Min(10).
+			Max(50).
+			Label("Bilet Numarası"),
+	})
+
+	rawData := map[string]any{
+		"ticket_number": ticketNumber,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Find ticket
 	ticket, err := s.ticketRepo.FindByTicketNumber(ticketNumber)
 	if err != nil {
 		return fmt.Errorf("bilet bulunamadı: %w", err)
 	}
 
-	// 2. Business rules
+	// 3. Business rules
 	if !ticket.CanUse() {
 		return fmt.Errorf("bilet kullanılamaz durumda")
 	}
 
-	// 3. Mark as used
+	// 4. Mark as used
 	if err := ticket.MarkAsUsed(); err != nil {
 		return fmt.Errorf("bilet kullanıldı olarak işaretlenemedi: %w", err)
 	}
 
-	// 4. Update in database
+	// 5. Update in database
 	if err := s.ticketRepo.Update(ticket); err != nil {
 		return fmt.Errorf("bilet güncellenemedi: %w", err)
 	}
 
-	// 5. Notify observers
+	// 6. Notify observers
 	s.eventPublisher.Notify(&observer.EventData{
 		Type:      observer.EventTypeTicketUsed,
 		Timestamp: time.Now(),

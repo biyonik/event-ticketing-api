@@ -6,29 +6,39 @@ import (
 	"time"
 
 	"github.com/biyonik/event-ticketing-api/internal/models"
+	"github.com/biyonik/event-ticketing-api/pkg/database"
 )
 
 type ReservationRepository struct {
-	db *sql.DB
+	db      *sql.DB
+	grammar database.Grammar
 }
 
 func NewReservationRepository(db *sql.DB) *ReservationRepository {
-	return &ReservationRepository{db: db}
+	return &ReservationRepository{
+		db:      db,
+		grammar: database.NewMySQLGrammar(),
+	}
 }
 
 // Payment Repository Methods
-func (r *ReservationRepository) CreatePayment(payment *models.Payment) (int64, error) {
-	query := `
-		INSERT INTO payments (user_id, event_id, amount, currency, status, payment_method,
-			transaction_id, provider_response, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
 
-	result, err := r.db.Exec(query,
-		payment.UserID, payment.EventID, payment.Amount, payment.Currency, payment.Status,
-		payment.PaymentMethod, payment.TransactionID, payment.ProviderResponse,
-		payment.CreatedAt, payment.UpdatedAt,
-	)
+// CreatePayment - Conduit-Go Builder ile payment oluşturma
+func (r *ReservationRepository) CreatePayment(payment *models.Payment) (int64, error) {
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("payments").
+		ExecInsert(map[string]interface{}{
+			"user_id":           payment.UserID,
+			"event_id":          payment.EventID,
+			"amount":            payment.Amount,
+			"currency":          payment.Currency,
+			"status":            payment.Status,
+			"payment_method":    payment.PaymentMethod,
+			"transaction_id":    payment.TransactionID,
+			"provider_response": payment.ProviderResponse,
+			"created_at":        payment.CreatedAt,
+			"updated_at":        payment.UpdatedAt,
+		})
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to create payment: %w", err)
@@ -42,20 +52,14 @@ func (r *ReservationRepository) CreatePayment(payment *models.Payment) (int64, e
 	return id, nil
 }
 
+// FindPaymentByID - Conduit-Go Builder ile single payment
 func (r *ReservationRepository) FindPaymentByID(id int64) (*models.Payment, error) {
-	query := `
-		SELECT id, user_id, event_id, amount, currency, status, payment_method,
-			transaction_id, provider_response, processed_at, created_at, updated_at
-		FROM payments
-		WHERE id = ?
-	`
+	var payment models.Payment
 
-	payment := &models.Payment{}
-	err := r.db.QueryRow(query, id).Scan(
-		&payment.ID, &payment.UserID, &payment.EventID, &payment.Amount, &payment.Currency,
-		&payment.Status, &payment.PaymentMethod, &payment.TransactionID,
-		&payment.ProviderResponse, &payment.ProcessedAt, &payment.CreatedAt, &payment.UpdatedAt,
-	)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("payments").
+		Where("id", "=", id).
+		First(&payment)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("payment not found")
@@ -64,23 +68,17 @@ func (r *ReservationRepository) FindPaymentByID(id int64) (*models.Payment, erro
 		return nil, fmt.Errorf("failed to find payment: %w", err)
 	}
 
-	return payment, nil
+	return &payment, nil
 }
 
+// FindPaymentByTransactionID - Builder ile transaction ID search
 func (r *ReservationRepository) FindPaymentByTransactionID(transactionID string) (*models.Payment, error) {
-	query := `
-		SELECT id, user_id, event_id, amount, currency, status, payment_method,
-			transaction_id, provider_response, processed_at, created_at, updated_at
-		FROM payments
-		WHERE transaction_id = ?
-	`
+	var payment models.Payment
 
-	payment := &models.Payment{}
-	err := r.db.QueryRow(query, transactionID).Scan(
-		&payment.ID, &payment.UserID, &payment.EventID, &payment.Amount, &payment.Currency,
-		&payment.Status, &payment.PaymentMethod, &payment.TransactionID,
-		&payment.ProviderResponse, &payment.ProcessedAt, &payment.CreatedAt, &payment.UpdatedAt,
-	)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("payments").
+		Where("transaction_id", "=", transactionID).
+		First(&payment)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("payment not found")
@@ -89,50 +87,40 @@ func (r *ReservationRepository) FindPaymentByTransactionID(transactionID string)
 		return nil, fmt.Errorf("failed to find payment: %w", err)
 	}
 
-	return payment, nil
+	return &payment, nil
 }
 
+// FindPaymentsByUserID - Builder ile user payments
 func (r *ReservationRepository) FindPaymentsByUserID(userID int64) ([]*models.Payment, error) {
-	query := `
-		SELECT id, user_id, event_id, amount, currency, status, payment_method,
-			transaction_id, provider_response, processed_at, created_at, updated_at
-		FROM payments
-		WHERE user_id = ?
-		ORDER BY created_at DESC
-	`
+	var payments []*models.Payment
 
-	rows, err := r.db.Query(query, userID)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("payments").
+		Where("user_id", "=", userID).
+		OrderBy("created_at", "DESC").
+		Get(&payments)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to query payments: %w", err)
-	}
-	defer rows.Close()
-
-	payments := []*models.Payment{}
-	for rows.Next() {
-		payment := &models.Payment{}
-		err := rows.Scan(
-			&payment.ID, &payment.UserID, &payment.EventID, &payment.Amount, &payment.Currency,
-			&payment.Status, &payment.PaymentMethod, &payment.TransactionID,
-			&payment.ProviderResponse, &payment.ProcessedAt, &payment.CreatedAt, &payment.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan payment: %w", err)
-		}
-		payments = append(payments, payment)
 	}
 
 	return payments, nil
 }
 
+// UpdatePaymentStatus - Builder ile payment status güncelleme
 func (r *ReservationRepository) UpdatePaymentStatus(id int64, status models.PaymentStatus, providerResponse string) error {
-	query := `
-		UPDATE payments
-		SET status = ?, provider_response = ?, processed_at = ?, updated_at = ?
-		WHERE id = ?
-	`
-
 	now := time.Now()
-	result, err := r.db.Exec(query, status, providerResponse, now, now, id)
+
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("payments").
+		Where("id", "=", id).
+		ExecUpdate(map[string]interface{}{
+			"status":            status,
+			"provider_response": providerResponse,
+			"processed_at":      now,
+			"updated_at":        now,
+		})
+
 	if err != nil {
 		return fmt.Errorf("failed to update payment status: %w", err)
 	}
@@ -149,6 +137,7 @@ func (r *ReservationRepository) UpdatePaymentStatus(id int64, status models.Paym
 	return nil
 }
 
+// GetTotalRevenueByEvent - SUM query (raw SQL for aggregate functions)
 func (r *ReservationRepository) GetTotalRevenueByEvent(eventID int64) (float64, error) {
 	query := `
 		SELECT COALESCE(SUM(amount), 0)
@@ -166,16 +155,19 @@ func (r *ReservationRepository) GetTotalRevenueByEvent(eventID int64) (float64, 
 }
 
 // Waiting List Repository Methods
-func (r *ReservationRepository) AddToWaitingList(waitingList *models.WaitingList) (int64, error) {
-	query := `
-		INSERT INTO waiting_lists (event_id, user_id, status, priority, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`
 
-	result, err := r.db.Exec(query,
-		waitingList.EventID, waitingList.UserID, waitingList.Status,
-		waitingList.Priority, waitingList.CreatedAt, waitingList.UpdatedAt,
-	)
+// AddToWaitingList - Conduit-Go Builder ile waiting list ekleme
+func (r *ReservationRepository) AddToWaitingList(waitingList *models.WaitingList) (int64, error) {
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		ExecInsert(map[string]interface{}{
+			"event_id":   waitingList.EventID,
+			"user_id":    waitingList.UserID,
+			"status":     waitingList.Status,
+			"priority":   waitingList.Priority,
+			"created_at": waitingList.CreatedAt,
+			"updated_at": waitingList.UpdatedAt,
+		})
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to add to waiting list: %w", err)
@@ -189,18 +181,14 @@ func (r *ReservationRepository) AddToWaitingList(waitingList *models.WaitingList
 	return id, nil
 }
 
+// FindWaitingListByID - Builder ile single waiting list entry
 func (r *ReservationRepository) FindWaitingListByID(id int64) (*models.WaitingList, error) {
-	query := `
-		SELECT id, event_id, user_id, status, priority, notified_at, created_at, updated_at
-		FROM waiting_lists
-		WHERE id = ?
-	`
+	var waitingList models.WaitingList
 
-	waitingList := &models.WaitingList{}
-	err := r.db.QueryRow(query, id).Scan(
-		&waitingList.ID, &waitingList.EventID, &waitingList.UserID, &waitingList.Status,
-		&waitingList.Priority, &waitingList.NotifiedAt, &waitingList.CreatedAt, &waitingList.UpdatedAt,
-	)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		Where("id", "=", id).
+		First(&waitingList)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("waiting list entry not found")
@@ -209,78 +197,56 @@ func (r *ReservationRepository) FindWaitingListByID(id int64) (*models.WaitingLi
 		return nil, fmt.Errorf("failed to find waiting list entry: %w", err)
 	}
 
-	return waitingList, nil
+	return &waitingList, nil
 }
 
+// FindWaitingListByEvent - Builder ile event waiting list
 func (r *ReservationRepository) FindWaitingListByEvent(eventID int64, limit int) ([]*models.WaitingList, error) {
-	query := `
-		SELECT id, event_id, user_id, status, priority, notified_at, created_at, updated_at
-		FROM waiting_lists
-		WHERE event_id = ? AND status = ?
-		ORDER BY priority DESC, created_at ASC
-		LIMIT ?
-	`
+	var waitingLists []*models.WaitingList
 
-	rows, err := r.db.Query(query, eventID, models.WaitingListStatusWaiting, limit)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		Where("event_id", "=", eventID).
+		Where("status", "=", models.WaitingListStatusWaiting).
+		OrderBy("priority", "DESC").
+		OrderBy("created_at", "ASC").
+		Limit(limit).
+		Get(&waitingLists)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to query waiting list: %w", err)
-	}
-	defer rows.Close()
-
-	waitingLists := []*models.WaitingList{}
-	for rows.Next() {
-		waitingList := &models.WaitingList{}
-		err := rows.Scan(
-			&waitingList.ID, &waitingList.EventID, &waitingList.UserID, &waitingList.Status,
-			&waitingList.Priority, &waitingList.NotifiedAt, &waitingList.CreatedAt, &waitingList.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan waiting list entry: %w", err)
-		}
-		waitingLists = append(waitingLists, waitingList)
 	}
 
 	return waitingLists, nil
 }
 
+// FindWaitingListByUser - Builder ile user waiting list
 func (r *ReservationRepository) FindWaitingListByUser(userID int64) ([]*models.WaitingList, error) {
-	query := `
-		SELECT id, event_id, user_id, status, priority, notified_at, created_at, updated_at
-		FROM waiting_lists
-		WHERE user_id = ?
-		ORDER BY created_at DESC
-	`
+	var waitingLists []*models.WaitingList
 
-	rows, err := r.db.Query(query, userID)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		Where("user_id", "=", userID).
+		OrderBy("created_at", "DESC").
+		Get(&waitingLists)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to query waiting list: %w", err)
-	}
-	defer rows.Close()
-
-	waitingLists := []*models.WaitingList{}
-	for rows.Next() {
-		waitingList := &models.WaitingList{}
-		err := rows.Scan(
-			&waitingList.ID, &waitingList.EventID, &waitingList.UserID, &waitingList.Status,
-			&waitingList.Priority, &waitingList.NotifiedAt, &waitingList.CreatedAt, &waitingList.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan waiting list entry: %w", err)
-		}
-		waitingLists = append(waitingLists, waitingList)
 	}
 
 	return waitingLists, nil
 }
 
+// UpdateWaitingListStatus - Builder ile waiting list status güncelleme
 func (r *ReservationRepository) UpdateWaitingListStatus(id int64, status models.WaitingListStatus) error {
-	query := `
-		UPDATE waiting_lists
-		SET status = ?, updated_at = ?
-		WHERE id = ?
-	`
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		Where("id", "=", id).
+		ExecUpdate(map[string]interface{}{
+			"status":     status,
+			"updated_at": time.Now(),
+		})
 
-	result, err := r.db.Exec(query, status, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update waiting list status: %w", err)
 	}
@@ -297,15 +263,20 @@ func (r *ReservationRepository) UpdateWaitingListStatus(id int64, status models.
 	return nil
 }
 
+// MarkAsNotified - Builder ile notified işareti
 func (r *ReservationRepository) MarkAsNotified(id int64) error {
-	query := `
-		UPDATE waiting_lists
-		SET status = ?, notified_at = ?, updated_at = ?
-		WHERE id = ? AND status = ?
-	`
-
 	now := time.Now()
-	result, err := r.db.Exec(query, models.WaitingListStatusNotified, now, now, id, models.WaitingListStatusWaiting)
+
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		Where("id", "=", id).
+		Where("status", "=", models.WaitingListStatusWaiting).
+		ExecUpdate(map[string]interface{}{
+			"status":      models.WaitingListStatusNotified,
+			"notified_at": now,
+			"updated_at":  now,
+		})
+
 	if err != nil {
 		return fmt.Errorf("failed to mark as notified: %w", err)
 	}
@@ -322,13 +293,13 @@ func (r *ReservationRepository) MarkAsNotified(id int64) error {
 	return nil
 }
 
+// RemoveFromWaitingList - Builder ile waiting list silme
 func (r *ReservationRepository) RemoveFromWaitingList(id int64) error {
-	query := `
-		DELETE FROM waiting_lists
-		WHERE id = ?
-	`
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("waiting_lists").
+		Where("id", "=", id).
+		ExecDelete()
 
-	result, err := r.db.Exec(query, id)
 	if err != nil {
 		return fmt.Errorf("failed to remove from waiting list: %w", err)
 	}
@@ -345,6 +316,7 @@ func (r *ReservationRepository) RemoveFromWaitingList(id int64) error {
 	return nil
 }
 
+// GetWaitingListCount - COUNT query (raw SQL for aggregate functions)
 func (r *ReservationRepository) GetWaitingListCount(eventID int64) (int, error) {
 	query := `
 		SELECT COUNT(*)
@@ -361,6 +333,7 @@ func (r *ReservationRepository) GetWaitingListCount(eventID int64) (int, error) 
 	return count, nil
 }
 
+// IsUserInWaitingList - COUNT query (raw SQL for aggregate functions)
 func (r *ReservationRepository) IsUserInWaitingList(eventID, userID int64) (bool, error) {
 	query := `
 		SELECT COUNT(*)
