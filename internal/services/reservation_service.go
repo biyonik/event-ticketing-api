@@ -7,6 +7,8 @@ import (
 	"github.com/biyonik/event-ticketing-api/internal/models"
 	"github.com/biyonik/event-ticketing-api/internal/patterns/observer"
 	"github.com/biyonik/event-ticketing-api/internal/repositories"
+	v "github.com/biyonik/event-ticketing-api/pkg/validation"
+	"github.com/biyonik/event-ticketing-api/pkg/validation/types"
 )
 
 type ReservationService struct {
@@ -38,13 +40,49 @@ func (s *ReservationService) CreatePayment(
 	paymentMethod models.PaymentMethod,
 	transactionID string,
 ) (*models.Payment, error) {
-	// 1. Validation
-	if amount <= 0 {
-		return nil, fmt.Errorf("ödeme tutarı sıfırdan büyük olmalıdır")
-	}
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"user_id": types.Number().
+			Required().
+			Min(1).
+			Label("Kullanıcı ID"),
+		"event_id": types.Number().
+			Required().
+			Min(1).
+			Label("Etkinlik ID"),
+		"amount": types.Number().
+			Required().
+			Min(0.01).
+			Label("Ödeme Tutarı"),
+		"currency": types.String().
+			Min(3).
+			Max(3).
+			Label("Para Birimi"),
+		"transaction_id": types.String().
+			Required().
+			Min(10).
+			Max(100).
+			Label("İşlem ID"),
+	})
 
+	// Default currency
 	if currency == "" {
 		currency = "TRY"
+	}
+
+	rawData := map[string]any{
+		"user_id":        float64(userID),
+		"event_id":       float64(eventID),
+		"amount":         amount,
+		"currency":       currency,
+		"transaction_id": transactionID,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return nil, fmt.Errorf("%s: %s", field, errs[0])
+		}
 	}
 
 	// 2. Create payment
@@ -71,18 +109,42 @@ func (s *ReservationService) CreatePayment(
 
 // ProcessPayment processes a payment (simulated payment gateway)
 func (s *ReservationService) ProcessPayment(paymentID int64, userEmail string) error {
-	// 1. Get payment
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"payment_id": types.Number().
+			Required().
+			Min(1).
+			Label("Ödeme ID"),
+		"user_email": types.String().
+			Required().
+			Email().
+			Label("E-posta"),
+	})
+
+	rawData := map[string]any{
+		"payment_id": float64(paymentID),
+		"user_email": userEmail,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Get payment
 	payment, err := s.reservationRepo.FindPaymentByID(paymentID)
 	if err != nil {
 		return fmt.Errorf("ödeme bulunamadı: %w", err)
 	}
 
-	// 2. Business rules
+	// 3. Business rules
 	if payment.Status != models.PaymentStatusPending {
 		return fmt.Errorf("ödeme zaten işlendi")
 	}
 
-	// 3. Simulate payment processing (in real app, call payment gateway)
+	// 4. Simulate payment processing (in real app, call payment gateway)
 	// For demo, we'll just mark as completed
 	providerResponse := fmt.Sprintf("Payment processed successfully. Amount: %.2f %s", payment.Amount, payment.Currency)
 
@@ -90,7 +152,7 @@ func (s *ReservationService) ProcessPayment(paymentID int64, userEmail string) e
 		return fmt.Errorf("ödeme durumu güncellenemedi: %w", err)
 	}
 
-	// 4. Notify observers
+	// 5. Notify observers
 	s.eventPublisher.Notify(&observer.EventData{
 		Type:      observer.EventTypePaymentCompleted,
 		Timestamp: time.Now(),
@@ -108,19 +170,49 @@ func (s *ReservationService) ProcessPayment(paymentID int64, userEmail string) e
 
 // FailPayment marks a payment as failed
 func (s *ReservationService) FailPayment(paymentID int64, userEmail, errorMessage string) error {
-	// 1. Get payment
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"payment_id": types.Number().
+			Required().
+			Min(1).
+			Label("Ödeme ID"),
+		"user_email": types.String().
+			Required().
+			Email().
+			Label("E-posta"),
+		"error_message": types.String().
+			Required().
+			Min(3).
+			Max(500).
+			Label("Hata Mesajı"),
+	})
+
+	rawData := map[string]any{
+		"payment_id":    float64(paymentID),
+		"user_email":    userEmail,
+		"error_message": errorMessage,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Get payment
 	payment, err := s.reservationRepo.FindPaymentByID(paymentID)
 	if err != nil {
 		return fmt.Errorf("ödeme bulunamadı: %w", err)
 	}
 
-	// 2. Update status
+	// 3. Update status
 	providerResponse := fmt.Sprintf("Payment failed: %s", errorMessage)
 	if err := s.reservationRepo.UpdatePaymentStatus(paymentID, models.PaymentStatusFailed, providerResponse); err != nil {
 		return fmt.Errorf("ödeme durumu güncellenemedi: %w", err)
 	}
 
-	// 3. Notify observers
+	// 4. Notify observers
 	s.eventPublisher.Notify(&observer.EventData{
 		Type:      observer.EventTypePaymentFailed,
 		Timestamp: time.Now(),
@@ -138,18 +230,42 @@ func (s *ReservationService) FailPayment(paymentID int64, userEmail, errorMessag
 
 // RefundPayment processes a refund
 func (s *ReservationService) RefundPayment(paymentID int64, userEmail string) error {
-	// 1. Get payment
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"payment_id": types.Number().
+			Required().
+			Min(1).
+			Label("Ödeme ID"),
+		"user_email": types.String().
+			Required().
+			Email().
+			Label("E-posta"),
+	})
+
+	rawData := map[string]any{
+		"payment_id": float64(paymentID),
+		"user_email": userEmail,
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Get payment
 	payment, err := s.reservationRepo.FindPaymentByID(paymentID)
 	if err != nil {
 		return fmt.Errorf("ödeme bulunamadı: %w", err)
 	}
 
-	// 2. Business rules
+	// 3. Business rules
 	if payment.Status != models.PaymentStatusCompleted {
 		return fmt.Errorf("sadece tamamlanmış ödemeler iade edilebilir")
 	}
 
-	// 3. Process refund (in real app, call payment gateway)
+	// 4. Process refund (in real app, call payment gateway)
 	providerResponse := fmt.Sprintf("Refund processed. Amount: %.2f %s", payment.Amount, payment.Currency)
 
 	if err := s.reservationRepo.UpdatePaymentStatus(paymentID, models.PaymentStatusRefunded, providerResponse); err != nil {
@@ -171,7 +287,37 @@ func (s *ReservationService) GetUserPayments(userID int64) ([]*models.Payment, e
 
 // AddToWaitingList adds a user to the waiting list for a sold-out event
 func (s *ReservationService) AddToWaitingList(userID, eventID int64, priority int) (*models.WaitingList, error) {
-	// 1. Verify event exists and is sold out
+	// 1. Validate input using Conduit-Go Validation
+	schema := v.Make().Shape(map[string]v.Type{
+		"user_id": types.Number().
+			Required().
+			Min(1).
+			Label("Kullanıcı ID"),
+		"event_id": types.Number().
+			Required().
+			Min(1).
+			Label("Etkinlik ID"),
+		"priority": types.Number().
+			Required().
+			Min(0).
+			Max(10).
+			Label("Öncelik"),
+	})
+
+	rawData := map[string]any{
+		"user_id":  float64(userID),
+		"event_id": float64(eventID),
+		"priority": float64(priority),
+	}
+
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		for field, errs := range result.Errors() {
+			return nil, fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// 2. Verify event exists and is sold out
 	event, err := s.eventRepo.FindByID(eventID)
 	if err != nil {
 		return nil, fmt.Errorf("etkinlik bulunamadı: %w", err)
@@ -181,7 +327,7 @@ func (s *ReservationService) AddToWaitingList(userID, eventID int64, priority in
 		return nil, fmt.Errorf("etkinlik tükenmedi, bekleme listesine eklenemez")
 	}
 
-	// 2. Check if user already in waiting list
+	// 3. Check if user already in waiting list
 	isInList, err := s.reservationRepo.IsUserInWaitingList(eventID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("bekleme listesi kontrolü yapılamadı: %w", err)
@@ -191,7 +337,7 @@ func (s *ReservationService) AddToWaitingList(userID, eventID int64, priority in
 		return nil, fmt.Errorf("kullanıcı zaten bekleme listesinde")
 	}
 
-	// 3. Add to waiting list
+	// 4. Add to waiting list
 	waitingList := &models.WaitingList{
 		EventID:   eventID,
 		UserID:    userID,
@@ -208,7 +354,7 @@ func (s *ReservationService) AddToWaitingList(userID, eventID int64, priority in
 
 	waitingList.ID = id
 
-	// 4. Notify observers
+	// 5. Notify observers
 	s.eventPublisher.Notify(&observer.EventData{
 		Type:      observer.EventTypeWaitingListAdded,
 		Timestamp: time.Now(),

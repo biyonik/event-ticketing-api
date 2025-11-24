@@ -6,30 +6,41 @@ import (
 	"time"
 
 	"github.com/biyonik/event-ticketing-api/internal/models"
+	"github.com/biyonik/event-ticketing-api/pkg/database"
 )
 
 type TicketRepository struct {
-	db *sql.DB
+	db      *sql.DB
+	grammar database.Grammar
 }
 
 func NewTicketRepository(db *sql.DB) *TicketRepository {
-	return &TicketRepository{db: db}
+	return &TicketRepository{
+		db:      db,
+		grammar: database.NewMySQLGrammar(),
+	}
 }
 
+// Create - Conduit-Go Builder ile ticket oluşturma
 func (r *TicketRepository) Create(ticket *models.Ticket) (int64, error) {
-	query := `
-		INSERT INTO tickets (event_id, user_id, seat_id, section_id, ticket_number,
-			ticket_type, status, price, qr_code_data, qr_code_image, verification_code,
-			reservation_expiry, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-
-	result, err := r.db.Exec(query,
-		ticket.EventID, ticket.UserID, ticket.SeatID, ticket.SectionID,
-		ticket.TicketNumber, ticket.TicketType, ticket.Status, ticket.Price,
-		ticket.QRCodeData, ticket.QRCodeImage, ticket.VerificationCode,
-		ticket.ReservationExpiry, ticket.CreatedAt, ticket.UpdatedAt,
-	)
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		ExecInsert(map[string]interface{}{
+			"event_id":           ticket.EventID,
+			"user_id":            ticket.UserID,
+			"seat_id":            ticket.SeatID,
+			"section_id":         ticket.SectionID,
+			"ticket_number":      ticket.TicketNumber,
+			"ticket_type":        ticket.TicketType,
+			"status":             ticket.Status,
+			"price":              ticket.Price,
+			"qr_code_data":       ticket.QRCodeData,
+			"qr_code_image":      ticket.QRCodeImage,
+			"verification_code":  ticket.VerificationCode,
+			"reservation_expiry": ticket.ReservationExpiry,
+			"created_at":         ticket.CreatedAt,
+			"updated_at":         ticket.UpdatedAt,
+		})
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to create ticket: %w", err)
@@ -43,23 +54,14 @@ func (r *TicketRepository) Create(ticket *models.Ticket) (int64, error) {
 	return id, nil
 }
 
+// FindByID - Builder ile single ticket
 func (r *TicketRepository) FindByID(id int64) (*models.Ticket, error) {
-	query := `
-		SELECT id, event_id, user_id, seat_id, section_id, ticket_number,
-			ticket_type, status, price, qr_code_data, qr_code_image, verification_code,
-			reservation_expiry, purchased_at, used_at, cancelled_at, created_at, updated_at
-		FROM tickets
-		WHERE id = ?
-	`
+	var ticket models.Ticket
 
-	ticket := &models.Ticket{}
-	err := r.db.QueryRow(query, id).Scan(
-		&ticket.ID, &ticket.EventID, &ticket.UserID, &ticket.SeatID, &ticket.SectionID,
-		&ticket.TicketNumber, &ticket.TicketType, &ticket.Status, &ticket.Price,
-		&ticket.QRCodeData, &ticket.QRCodeImage, &ticket.VerificationCode,
-		&ticket.ReservationExpiry, &ticket.PurchasedAt, &ticket.UsedAt,
-		&ticket.CancelledAt, &ticket.CreatedAt, &ticket.UpdatedAt,
-	)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", id).
+		First(&ticket)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("ticket not found")
@@ -68,26 +70,17 @@ func (r *TicketRepository) FindByID(id int64) (*models.Ticket, error) {
 		return nil, fmt.Errorf("failed to find ticket: %w", err)
 	}
 
-	return ticket, nil
+	return &ticket, nil
 }
 
+// FindByTicketNumber - Builder ile ticket number search
 func (r *TicketRepository) FindByTicketNumber(ticketNumber string) (*models.Ticket, error) {
-	query := `
-		SELECT id, event_id, user_id, seat_id, section_id, ticket_number,
-			ticket_type, status, price, qr_code_data, qr_code_image, verification_code,
-			reservation_expiry, purchased_at, used_at, cancelled_at, created_at, updated_at
-		FROM tickets
-		WHERE ticket_number = ?
-	`
+	var ticket models.Ticket
 
-	ticket := &models.Ticket{}
-	err := r.db.QueryRow(query, ticketNumber).Scan(
-		&ticket.ID, &ticket.EventID, &ticket.UserID, &ticket.SeatID, &ticket.SectionID,
-		&ticket.TicketNumber, &ticket.TicketType, &ticket.Status, &ticket.Price,
-		&ticket.QRCodeData, &ticket.QRCodeImage, &ticket.VerificationCode,
-		&ticket.ReservationExpiry, &ticket.PurchasedAt, &ticket.UsedAt,
-		&ticket.CancelledAt, &ticket.CreatedAt, &ticket.UpdatedAt,
-	)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("ticket_number", "=", ticketNumber).
+		First(&ticket)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("ticket not found")
@@ -96,93 +89,58 @@ func (r *TicketRepository) FindByTicketNumber(ticketNumber string) (*models.Tick
 		return nil, fmt.Errorf("failed to find ticket: %w", err)
 	}
 
-	return ticket, nil
+	return &ticket, nil
 }
 
+// FindByUserID - Builder ile user tickets
 func (r *TicketRepository) FindByUserID(userID int64) ([]*models.Ticket, error) {
-	query := `
-		SELECT id, event_id, user_id, seat_id, section_id, ticket_number,
-			ticket_type, status, price, qr_code_data, qr_code_image, verification_code,
-			reservation_expiry, purchased_at, used_at, cancelled_at, created_at, updated_at
-		FROM tickets
-		WHERE user_id = ?
-		ORDER BY created_at DESC
-	`
+	var tickets []*models.Ticket
 
-	rows, err := r.db.Query(query, userID)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("user_id", "=", userID).
+		OrderBy("created_at", "DESC").
+		Get(&tickets)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tickets: %w", err)
-	}
-	defer rows.Close()
-
-	tickets := []*models.Ticket{}
-	for rows.Next() {
-		ticket := &models.Ticket{}
-		err := rows.Scan(
-			&ticket.ID, &ticket.EventID, &ticket.UserID, &ticket.SeatID, &ticket.SectionID,
-			&ticket.TicketNumber, &ticket.TicketType, &ticket.Status, &ticket.Price,
-			&ticket.QRCodeData, &ticket.QRCodeImage, &ticket.VerificationCode,
-			&ticket.ReservationExpiry, &ticket.PurchasedAt, &ticket.UsedAt,
-			&ticket.CancelledAt, &ticket.CreatedAt, &ticket.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan ticket: %w", err)
-		}
-		tickets = append(tickets, ticket)
 	}
 
 	return tickets, nil
 }
 
+// FindByEventID - Builder ile event tickets
 func (r *TicketRepository) FindByEventID(eventID int64) ([]*models.Ticket, error) {
-	query := `
-		SELECT id, event_id, user_id, seat_id, section_id, ticket_number,
-			ticket_type, status, price, qr_code_data, qr_code_image, verification_code,
-			reservation_expiry, purchased_at, used_at, cancelled_at, created_at, updated_at
-		FROM tickets
-		WHERE event_id = ?
-		ORDER BY created_at DESC
-	`
+	var tickets []*models.Ticket
 
-	rows, err := r.db.Query(query, eventID)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("event_id", "=", eventID).
+		OrderBy("created_at", "DESC").
+		Get(&tickets)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tickets: %w", err)
-	}
-	defer rows.Close()
-
-	tickets := []*models.Ticket{}
-	for rows.Next() {
-		ticket := &models.Ticket{}
-		err := rows.Scan(
-			&ticket.ID, &ticket.EventID, &ticket.UserID, &ticket.SeatID, &ticket.SectionID,
-			&ticket.TicketNumber, &ticket.TicketType, &ticket.Status, &ticket.Price,
-			&ticket.QRCodeData, &ticket.QRCodeImage, &ticket.VerificationCode,
-			&ticket.ReservationExpiry, &ticket.PurchasedAt, &ticket.UsedAt,
-			&ticket.CancelledAt, &ticket.CreatedAt, &ticket.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan ticket: %w", err)
-		}
-		tickets = append(tickets, ticket)
 	}
 
 	return tickets, nil
 }
 
+// Update - Builder ile ticket güncelleme
 func (r *TicketRepository) Update(ticket *models.Ticket) error {
-	query := `
-		UPDATE tickets
-		SET status = ?, reservation_expiry = ?, purchased_at = ?, used_at = ?,
-			cancelled_at = ?, updated_at = ?
-		WHERE id = ?
-	`
-
 	ticket.UpdatedAt = time.Now()
 
-	result, err := r.db.Exec(query,
-		ticket.Status, ticket.ReservationExpiry, ticket.PurchasedAt,
-		ticket.UsedAt, ticket.CancelledAt, ticket.UpdatedAt, ticket.ID,
-	)
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", ticket.ID).
+		ExecUpdate(map[string]interface{}{
+			"status":             ticket.Status,
+			"reservation_expiry": ticket.ReservationExpiry,
+			"purchased_at":       ticket.PurchasedAt,
+			"used_at":            ticket.UsedAt,
+			"cancelled_at":       ticket.CancelledAt,
+			"updated_at":         ticket.UpdatedAt,
+		})
 
 	if err != nil {
 		return fmt.Errorf("failed to update ticket: %w", err)
@@ -200,14 +158,16 @@ func (r *TicketRepository) Update(ticket *models.Ticket) error {
 	return nil
 }
 
+// UpdateStatus - Builder ile status güncelleme
 func (r *TicketRepository) UpdateStatus(id int64, status models.TicketStatus) error {
-	query := `
-		UPDATE tickets
-		SET status = ?, updated_at = ?
-		WHERE id = ?
-	`
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", id).
+		ExecUpdate(map[string]interface{}{
+			"status":     status,
+			"updated_at": time.Now(),
+		})
 
-	result, err := r.db.Exec(query, status, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update ticket status: %w", err)
 	}
@@ -224,15 +184,21 @@ func (r *TicketRepository) UpdateStatus(id int64, status models.TicketStatus) er
 	return nil
 }
 
+// MarkAsSold - Builder ile sold işareti
 func (r *TicketRepository) MarkAsSold(id int64) error {
-	query := `
-		UPDATE tickets
-		SET status = ?, purchased_at = ?, reservation_expiry = NULL, updated_at = ?
-		WHERE id = ? AND status = ?
-	`
-
 	now := time.Now()
-	result, err := r.db.Exec(query, models.TicketStatusSold, now, now, id, models.TicketStatusReserved)
+
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", id).
+		Where("status", "=", models.TicketStatusReserved).
+		ExecUpdate(map[string]interface{}{
+			"status":             models.TicketStatusSold,
+			"purchased_at":       now,
+			"reservation_expiry": nil,
+			"updated_at":         now,
+		})
+
 	if err != nil {
 		return fmt.Errorf("failed to mark ticket as sold: %w", err)
 	}
@@ -249,15 +215,20 @@ func (r *TicketRepository) MarkAsSold(id int64) error {
 	return nil
 }
 
+// MarkAsUsed - Builder ile used işareti
 func (r *TicketRepository) MarkAsUsed(id int64) error {
-	query := `
-		UPDATE tickets
-		SET status = ?, used_at = ?, updated_at = ?
-		WHERE id = ? AND status = ?
-	`
-
 	now := time.Now()
-	result, err := r.db.Exec(query, models.TicketStatusUsed, now, now, id, models.TicketStatusSold)
+
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", id).
+		Where("status", "=", models.TicketStatusSold).
+		ExecUpdate(map[string]interface{}{
+			"status":     models.TicketStatusUsed,
+			"used_at":    now,
+			"updated_at": now,
+		})
+
 	if err != nil {
 		return fmt.Errorf("failed to mark ticket as used: %w", err)
 	}
@@ -274,16 +245,20 @@ func (r *TicketRepository) MarkAsUsed(id int64) error {
 	return nil
 }
 
+// MarkAsCancelled - Builder ile cancelled işareti (WhereIn kullanımı)
 func (r *TicketRepository) MarkAsCancelled(id int64) error {
-	query := `
-		UPDATE tickets
-		SET status = ?, cancelled_at = ?, updated_at = ?
-		WHERE id = ? AND status IN (?, ?)
-	`
-
 	now := time.Now()
-	result, err := r.db.Exec(query, models.TicketStatusCancelled, now, now, id,
-		models.TicketStatusReserved, models.TicketStatusSold)
+
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", id).
+		WhereIn("status", []interface{}{models.TicketStatusReserved, models.TicketStatusSold}).
+		ExecUpdate(map[string]interface{}{
+			"status":       models.TicketStatusCancelled,
+			"cancelled_at": now,
+			"updated_at":   now,
+		})
+
 	if err != nil {
 		return fmt.Errorf("failed to mark ticket as cancelled: %w", err)
 	}
@@ -300,49 +275,35 @@ func (r *TicketRepository) MarkAsCancelled(id int64) error {
 	return nil
 }
 
+// FindExpiredReservations - Builder ile expired tickets
 func (r *TicketRepository) FindExpiredReservations() ([]*models.Ticket, error) {
-	query := `
-		SELECT id, event_id, user_id, seat_id, section_id, ticket_number,
-			ticket_type, status, price, qr_code_data, qr_code_image, verification_code,
-			reservation_expiry, purchased_at, used_at, cancelled_at, created_at, updated_at
-		FROM tickets
-		WHERE status = ? AND reservation_expiry < ?
-	`
+	var tickets []*models.Ticket
 
-	rows, err := r.db.Query(query, models.TicketStatusReserved, time.Now())
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("status", "=", models.TicketStatusReserved).
+		Where("reservation_expiry", "<", time.Now()).
+		Get(&tickets)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to query expired reservations: %w", err)
-	}
-	defer rows.Close()
-
-	tickets := []*models.Ticket{}
-	for rows.Next() {
-		ticket := &models.Ticket{}
-		err := rows.Scan(
-			&ticket.ID, &ticket.EventID, &ticket.UserID, &ticket.SeatID, &ticket.SectionID,
-			&ticket.TicketNumber, &ticket.TicketType, &ticket.Status, &ticket.Price,
-			&ticket.QRCodeData, &ticket.QRCodeImage, &ticket.VerificationCode,
-			&ticket.ReservationExpiry, &ticket.PurchasedAt, &ticket.UsedAt,
-			&ticket.CancelledAt, &ticket.CreatedAt, &ticket.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan ticket: %w", err)
-		}
-		tickets = append(tickets, ticket)
 	}
 
 	return tickets, nil
 }
 
+// ExpireReservation - Builder ile reservation expire
 func (r *TicketRepository) ExpireReservation(id int64) error {
-	query := `
-		UPDATE tickets
-		SET status = ?, updated_at = ?
-		WHERE id = ? AND status = ? AND reservation_expiry < ?
-	`
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("tickets").
+		Where("id", "=", id).
+		Where("status", "=", models.TicketStatusReserved).
+		Where("reservation_expiry", "<", time.Now()).
+		ExecUpdate(map[string]interface{}{
+			"status":     models.TicketStatusExpired,
+			"updated_at": time.Now(),
+		})
 
-	result, err := r.db.Exec(query, models.TicketStatusExpired, time.Now(), id,
-		models.TicketStatusReserved, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to expire reservation: %w", err)
 	}
@@ -359,6 +320,7 @@ func (r *TicketRepository) ExpireReservation(id int64) error {
 	return nil
 }
 
+// GetSoldTicketCountByEvent - COUNT query (raw SQL needed for aggregate functions)
 func (r *TicketRepository) GetSoldTicketCountByEvent(eventID int64) (int, error) {
 	query := `
 		SELECT COUNT(*)
@@ -375,6 +337,7 @@ func (r *TicketRepository) GetSoldTicketCountByEvent(eventID int64) (int, error)
 	return count, nil
 }
 
+// IsSeatTaken - COUNT query (raw SQL for aggregate)
 func (r *TicketRepository) IsSeatTaken(eventID, seatID int64) (bool, error) {
 	query := `
 		SELECT COUNT(*)
@@ -392,6 +355,7 @@ func (r *TicketRepository) IsSeatTaken(eventID, seatID int64) (bool, error) {
 	return count > 0, nil
 }
 
+// GetRevenueByEvent - SUM query (raw SQL for aggregate)
 func (r *TicketRepository) GetRevenueByEvent(eventID int64) (float64, error) {
 	query := `
 		SELECT COALESCE(SUM(price), 0)
