@@ -8,13 +8,15 @@ import (
 	"github.com/biyonik/event-ticketing-api/internal/patterns/observer"
 	"github.com/biyonik/event-ticketing-api/internal/patterns/strategy"
 	"github.com/biyonik/event-ticketing-api/internal/repositories"
+	v "github.com/biyonik/event-ticketing-api/pkg/validation"
+	"github.com/biyonik/event-ticketing-api/pkg/validation/types"
 )
 
 type EventService struct {
-	eventRepo         *repositories.EventRepository
-	venueRepo         *repositories.VenueRepository
-	pricingFactory    *strategy.PricingStrategyFactory
-	eventPublisher    *observer.EventPublisher
+	eventRepo      *repositories.EventRepository
+	venueRepo      *repositories.VenueRepository
+	pricingFactory *strategy.PricingStrategyFactory
+	eventPublisher *observer.EventPublisher
 }
 
 func NewEventService(
@@ -30,6 +32,7 @@ func NewEventService(
 	}
 }
 
+// CreateEvent - Conduit-Go Validation kullanarak event oluşturma
 func (s *EventService) CreateEvent(
 	name, description string,
 	eventType models.EventType,
@@ -40,11 +43,55 @@ func (s *EventService) CreateEvent(
 	featured bool,
 	metadata string,
 ) (*models.Event, error) {
-	// 1. Validation
-	if name == "" {
-		return nil, fmt.Errorf("etkinlik adı boş olamaz")
+	// 1. Validation - Conduit-Go Validation Schema kullanımı
+	schema := v.Make().Shape(map[string]v.Type{
+		"name": types.String().
+			Required().
+			Min(3).
+			Max(255).
+			Label("Etkinlik Adı"),
+		"description": types.String().
+			Required().
+			Min(10).
+			Max(2000).
+			Label("Açıklama"),
+		"type": types.String().
+			Required().
+			OneOf("concert", "theater", "sports", "conference", "festival").
+			Label("Etkinlik Tipi"),
+		"base_price": types.Number().
+			Required().
+			Min(0.01).
+			Label("Temel Fiyat"),
+		"image_url": types.String().
+			URL().
+			Max(500).
+			Label("Görsel URL"),
+	})
+
+	rawData := map[string]any{
+		"name":        name,
+		"description": description,
+		"type":        string(eventType),
+		"base_price":  basePrice,
+		"image_url":   imageURL,
 	}
 
+	result := schema.Validate(rawData)
+	if result.HasErrors() {
+		// İlk hatayı döndür
+		for field, errs := range result.Errors() {
+			return nil, fmt.Errorf("%s: %s", field, errs[0])
+		}
+	}
+
+	// Validasyondan geçen temiz veriyi al
+	validData := result.ValidData()
+	validatedName := validData["name"].(string)
+	validatedDesc := validData["description"].(string)
+	validatedPrice := validData["base_price"].(float64)
+
+	// 2. Business logic validation - Tarih kontrolleri
 	if startTime.Before(time.Now()) {
 		return nil, fmt.Errorf("etkinlik başlangıç zamanı geçmişte olamaz")
 	}
@@ -53,26 +100,22 @@ func (s *EventService) CreateEvent(
 		return nil, fmt.Errorf("bitiş zamanı başlangıç zamanından önce olamaz")
 	}
 
-	if basePrice <= 0 {
-		return nil, fmt.Errorf("temel fiyat sıfırdan büyük olmalıdır")
-	}
-
-	// 2. Verify venue exists
+	// 3. Verify venue exists
 	venue, err := s.venueRepo.FindByID(venueID)
 	if err != nil {
 		return nil, fmt.Errorf("mekan bulunamadı: %w", err)
 	}
 
-	// 3. Create event
+	// 4. Create event
 	event := &models.Event{
-		Name:           name,
-		Description:    description,
+		Name:           validatedName,
+		Description:    validatedDesc,
 		Type:           eventType,
 		Status:         models.EventStatusDraft,
 		VenueID:        venueID,
 		StartTime:      startTime,
 		EndTime:        endTime,
-		BasePrice:      basePrice,
+		BasePrice:      validatedPrice,
 		TotalCapacity:  venue.Capacity,
 		AvailableSeats: venue.Capacity,
 		ImageURL:       imageURL,
@@ -124,9 +167,18 @@ func (s *EventService) UpdateEvent(id int64, updates map[string]interface{}) (*m
 		return nil, fmt.Errorf("etkinlik bulunamadı: %w", err)
 	}
 
-	// 2. Apply updates
-	if name, ok := updates["name"].(string); ok && name != "" {
-		event.Name = name
+	// 2. Validate updates with Conduit-Go validation
+	if name, ok := updates["name"].(string); ok {
+		schema := v.Make().Shape(map[string]v.Type{
+			"name": types.String().Required().Min(3).Max(255).Label("Etkinlik Adı"),
+		})
+
+		result := schema.Validate(map[string]any{"name": name})
+		if result.HasErrors() {
+			return nil, fmt.Errorf("name: %s", result.Errors()["name"][0])
+		}
+
+		event.Name = result.ValidData()["name"].(string)
 	}
 
 	if description, ok := updates["description"].(string); ok {
@@ -221,10 +273,10 @@ func (s *EventService) PublishEvent(id int64) error {
 		Type:      observer.EventTypeEventStatusChanged,
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
-			"event_id":    id,
-			"event_name":  event.Name,
-			"new_status":  models.EventStatusPublished,
-			"start_time":  event.StartTime,
+			"event_id":   id,
+			"event_name": event.Name,
+			"new_status": models.EventStatusPublished,
+			"start_time": event.StartTime,
 		},
 	})
 
@@ -318,15 +370,23 @@ func (s *EventService) GetFeaturedEvents(limit int) ([]*models.Event, error) {
 }
 
 func (s *EventService) SearchEvents(keyword string, limit int) ([]*models.Event, error) {
-	if keyword == "" {
-		return nil, fmt.Errorf("arama kelimesi boş olamaz")
+	// Conduit-Go Validation ile keyword kontrolü
+	schema := v.Make().Shape(map[string]v.Type{
+		"keyword": types.String().Required().Min(2).Max(100).Label("Arama Kelimesi"),
+	})
+
+	result := schema.Validate(map[string]any{"keyword": keyword})
+	if result.HasErrors() {
+		return nil, fmt.Errorf("keyword: %s", result.Errors()["keyword"][0])
 	}
+
+	validKeyword := result.ValidData()["keyword"].(string)
 
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 
-	events, err := s.eventRepo.SearchByName(keyword, limit)
+	events, err := s.eventRepo.SearchByName(validKeyword, limit)
 	if err != nil {
 		return nil, fmt.Errorf("etkinlik araması yapılamadı: %w", err)
 	}

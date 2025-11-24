@@ -6,29 +6,42 @@ import (
 	"time"
 
 	"github.com/biyonik/event-ticketing-api/internal/models"
+	"github.com/biyonik/event-ticketing-api/pkg/database"
 )
 
 type EventRepository struct {
-	db *sql.DB
+	db      *sql.DB
+	grammar database.Grammar
 }
 
 func NewEventRepository(db *sql.DB) *EventRepository {
-	return &EventRepository{db: db}
+	return &EventRepository{
+		db:      db,
+		grammar: database.NewMySQLGrammar(),
+	}
 }
 
+// Create - Conduit-Go Database Builder ile event oluşturma
 func (r *EventRepository) Create(event *models.Event) (int64, error) {
-	query := `
-		INSERT INTO events (name, description, type, status, venue_id, start_time, end_time,
-			base_price, total_capacity, available_seats, image_url, featured, metadata, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-
-	result, err := r.db.Exec(query,
-		event.Name, event.Description, event.Type, event.Status, event.VenueID,
-		event.StartTime, event.EndTime, event.BasePrice, event.TotalCapacity,
-		event.AvailableSeats, event.ImageURL, event.Featured, event.Metadata,
-		event.CreatedAt, event.UpdatedAt,
-	)
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		ExecInsert(map[string]interface{}{
+			"name":            event.Name,
+			"description":     event.Description,
+			"type":            event.Type,
+			"status":          event.Status,
+			"venue_id":        event.VenueID,
+			"start_time":      event.StartTime,
+			"end_time":        event.EndTime,
+			"base_price":      event.BasePrice,
+			"total_capacity":  event.TotalCapacity,
+			"available_seats": event.AvailableSeats,
+			"image_url":       event.ImageURL,
+			"featured":        event.Featured,
+			"metadata":        event.Metadata,
+			"created_at":      event.CreatedAt,
+			"updated_at":      event.UpdatedAt,
+		})
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to create event: %w", err)
@@ -42,23 +55,15 @@ func (r *EventRepository) Create(event *models.Event) (int64, error) {
 	return id, nil
 }
 
+// FindByID - Conduit-Go Query Builder ile single event
 func (r *EventRepository) FindByID(id int64) (*models.Event, error) {
-	query := `
-		SELECT id, name, description, type, status, venue_id, start_time, end_time,
-			base_price, total_capacity, available_seats, image_url, featured, metadata,
-			created_at, updated_at, deleted_at
-		FROM events
-		WHERE id = ? AND deleted_at IS NULL
-	`
+	var event models.Event
 
-	event := &models.Event{}
-	err := r.db.QueryRow(query, id).Scan(
-		&event.ID, &event.Name, &event.Description, &event.Type, &event.Status,
-		&event.VenueID, &event.StartTime, &event.EndTime, &event.BasePrice,
-		&event.TotalCapacity, &event.AvailableSeats, &event.ImageURL,
-		&event.Featured, &event.Metadata, &event.CreatedAt, &event.UpdatedAt,
-		&event.DeletedAt,
-	)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		Where("id", "=", id).
+		WhereNull("deleted_at").
+		First(&event)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("event not found")
@@ -67,88 +72,72 @@ func (r *EventRepository) FindByID(id int64) (*models.Event, error) {
 		return nil, fmt.Errorf("failed to find event: %w", err)
 	}
 
-	return event, nil
+	return &event, nil
 }
 
+// FindAll - Conduit-Go Query Builder ile filtreleme
 func (r *EventRepository) FindAll(filters map[string]interface{}, limit, offset int) ([]*models.Event, error) {
-	query := `
-		SELECT id, name, description, type, status, venue_id, start_time, end_time,
-			base_price, total_capacity, available_seats, image_url, featured, metadata,
-			created_at, updated_at
-		FROM events
-		WHERE deleted_at IS NULL
-	`
+	builder := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		WhereNull("deleted_at")
 
-	args := []interface{}{}
-
-	// Apply filters
+	// Apply filters using Conduit-Go query builder
 	if status, ok := filters["status"].(models.EventStatus); ok {
-		query += " AND status = ?"
-		args = append(args, status)
+		builder.Where("status", "=", status)
 	}
 
 	if eventType, ok := filters["type"].(models.EventType); ok {
-		query += " AND type = ?"
-		args = append(args, eventType)
+		builder.Where("type", "=", eventType)
 	}
 
 	if featured, ok := filters["featured"].(bool); ok {
-		query += " AND featured = ?"
-		args = append(args, featured)
+		builder.Where("featured", "=", featured)
 	}
 
 	if startDate, ok := filters["start_date"].(time.Time); ok {
-		query += " AND start_time >= ?"
-		args = append(args, startDate)
+		builder.Where("start_time", ">=", startDate)
 	}
 
 	if endDate, ok := filters["end_date"].(time.Time); ok {
-		query += " AND start_time <= ?"
-		args = append(args, endDate)
+		builder.Where("start_time", "<=", endDate)
 	}
 
-	query += " ORDER BY start_time DESC LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
+	var events []*models.Event
+	err := builder.
+		OrderBy("start_time", "DESC").
+		Limit(limit).
+		Offset(offset).
+		Get(&events)
 
-	rows, err := r.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query events: %w", err)
-	}
-	defer rows.Close()
-
-	events := []*models.Event{}
-	for rows.Next() {
-		event := &models.Event{}
-		err := rows.Scan(
-			&event.ID, &event.Name, &event.Description, &event.Type, &event.Status,
-			&event.VenueID, &event.StartTime, &event.EndTime, &event.BasePrice,
-			&event.TotalCapacity, &event.AvailableSeats, &event.ImageURL,
-			&event.Featured, &event.Metadata, &event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-		events = append(events, event)
 	}
 
 	return events, nil
 }
 
+// Update - Conduit-Go Builder ile güncelleme
 func (r *EventRepository) Update(event *models.Event) error {
-	query := `
-		UPDATE events
-		SET name = ?, description = ?, type = ?, status = ?, start_time = ?, end_time = ?,
-			base_price = ?, available_seats = ?, image_url = ?, featured = ?, metadata = ?, updated_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`
-
 	event.UpdatedAt = time.Now()
 
-	result, err := r.db.Exec(query,
-		event.Name, event.Description, event.Type, event.Status, event.StartTime,
-		event.EndTime, event.BasePrice, event.AvailableSeats, event.ImageURL,
-		event.Featured, event.Metadata, event.UpdatedAt, event.ID,
-	)
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		Where("id", "=", event.ID).
+		WhereNull("deleted_at").
+		ExecUpdate(map[string]interface{}{
+			"name":            event.Name,
+			"description":     event.Description,
+			"type":            event.Type,
+			"status":          event.Status,
+			"start_time":      event.StartTime,
+			"end_time":        event.EndTime,
+			"base_price":      event.BasePrice,
+			"available_seats": event.AvailableSeats,
+			"image_url":       event.ImageURL,
+			"featured":        event.Featured,
+			"metadata":        event.Metadata,
+			"updated_at":      event.UpdatedAt,
+		})
 
 	if err != nil {
 		return fmt.Errorf("failed to update event: %w", err)
@@ -166,14 +155,16 @@ func (r *EventRepository) Update(event *models.Event) error {
 	return nil
 }
 
+// Delete - Soft delete using Conduit-Go Builder
 func (r *EventRepository) Delete(id int64) error {
-	query := `
-		UPDATE events
-		SET deleted_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		Where("id", "=", id).
+		WhereNull("deleted_at").
+		ExecUpdate(map[string]interface{}{
+			"deleted_at": time.Now(),
+		})
 
-	result, err := r.db.Exec(query, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to delete event: %w", err)
 	}
@@ -190,14 +181,17 @@ func (r *EventRepository) Delete(id int64) error {
 	return nil
 }
 
+// UpdateStatus - Builder ile status güncelleme
 func (r *EventRepository) UpdateStatus(id int64, status models.EventStatus) error {
-	query := `
-		UPDATE events
-		SET status = ?, updated_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`
+	result, err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		Where("id", "=", id).
+		WhereNull("deleted_at").
+		ExecUpdate(map[string]interface{}{
+			"status":     status,
+			"updated_at": time.Now(),
+		})
 
-	result, err := r.db.Exec(query, status, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update event status: %w", err)
 	}
@@ -214,7 +208,9 @@ func (r *EventRepository) UpdateStatus(id int64, status models.EventStatus) erro
 	return nil
 }
 
+// DecrementAvailableSeats - Atomic decrement (Conduit-Go'da increment/decrement yok, raw SQL kullanıyoruz ama prepared statement ile)
 func (r *EventRepository) DecrementAvailableSeats(id int64, count int) error {
+	// Conduit-Go'da henüz Decrement/Increment yok, raw SQL ama güvenli
 	query := `
 		UPDATE events
 		SET available_seats = available_seats - ?, updated_at = ?
@@ -238,6 +234,7 @@ func (r *EventRepository) DecrementAvailableSeats(id int64, count int) error {
 	return nil
 }
 
+// IncrementAvailableSeats - Atomic increment
 func (r *EventRepository) IncrementAvailableSeats(id int64, count int) error {
 	query := `
 		UPDATE events
@@ -262,114 +259,65 @@ func (r *EventRepository) IncrementAvailableSeats(id int64, count int) error {
 	return nil
 }
 
+// GetUpcomingEvents - Builder ile WhereIn kullanımı
 func (r *EventRepository) GetUpcomingEvents(limit int) ([]*models.Event, error) {
-	query := `
-		SELECT id, name, description, type, status, venue_id, start_time, end_time,
-			base_price, total_capacity, available_seats, image_url, featured, metadata,
-			created_at, updated_at
-		FROM events
-		WHERE deleted_at IS NULL
-			AND status IN (?, ?)
-			AND start_time > NOW()
-		ORDER BY start_time ASC
-		LIMIT ?
-	`
+	var events []*models.Event
 
-	rows, err := r.db.Query(query, models.EventStatusPublished, models.EventStatusSaleActive, limit)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		WhereNull("deleted_at").
+		WhereIn("status", []interface{}{models.EventStatusPublished, models.EventStatusSaleActive}).
+		Where("start_time", ">", time.Now()).
+		OrderBy("start_time", "ASC").
+		Limit(limit).
+		Get(&events)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get upcoming events: %w", err)
 	}
-	defer rows.Close()
-
-	events := []*models.Event{}
-	for rows.Next() {
-		event := &models.Event{}
-		err := rows.Scan(
-			&event.ID, &event.Name, &event.Description, &event.Type, &event.Status,
-			&event.VenueID, &event.StartTime, &event.EndTime, &event.BasePrice,
-			&event.TotalCapacity, &event.AvailableSeats, &event.ImageURL,
-			&event.Featured, &event.Metadata, &event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-		events = append(events, event)
-	}
 
 	return events, nil
 }
 
-func (r *EventRepository) GetFeaturedEvents(limit int) ([]*models.Event, error) {
-	query := `
-		SELECT id, name, description, type, status, venue_id, start_time, end_time,
-			base_price, total_capacity, available_seats, image_url, featured, metadata,
-			created_at, updated_at
-		FROM events
-		WHERE deleted_at IS NULL
-			AND featured = true
-			AND status IN (?, ?)
-			AND start_time > NOW()
-		ORDER BY start_time ASC
-		LIMIT ?
-	`
+// GetFeaturedEvents - Builder ile featured events
+func (r *EventRepository) GetFeaturedEvents(limit int) ([]*models.Event, error] {
+	var events []*models.Event
 
-	rows, err := r.db.Query(query, models.EventStatusPublished, models.EventStatusSaleActive, limit)
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		WhereNull("deleted_at").
+		Where("featured", "=", true).
+		WhereIn("status", []interface{}{models.EventStatusPublished, models.EventStatusSaleActive}).
+		Where("start_time", ">", time.Now()).
+		OrderBy("start_time", "ASC").
+		Limit(limit).
+		Get(&events)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get featured events: %w", err)
 	}
-	defer rows.Close()
-
-	events := []*models.Event{}
-	for rows.Next() {
-		event := &models.Event{}
-		err := rows.Scan(
-			&event.ID, &event.Name, &event.Description, &event.Type, &event.Status,
-			&event.VenueID, &event.StartTime, &event.EndTime, &event.BasePrice,
-			&event.TotalCapacity, &event.AvailableSeats, &event.ImageURL,
-			&event.Featured, &event.Metadata, &event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-		events = append(events, event)
-	}
 
 	return events, nil
 }
 
+// SearchByName - Builder ile LIKE search (OrWhere ile)
 func (r *EventRepository) SearchByName(keyword string, limit int) ([]*models.Event, error) {
-	query := `
-		SELECT id, name, description, type, status, venue_id, start_time, end_time,
-			base_price, total_capacity, available_seats, image_url, featured, metadata,
-			created_at, updated_at
-		FROM events
-		WHERE deleted_at IS NULL
-			AND (name LIKE ? OR description LIKE ?)
-			AND status IN (?, ?)
-		ORDER BY start_time ASC
-		LIMIT ?
-	`
+	var events []*models.Event
 
 	searchTerm := "%" + keyword + "%"
-	rows, err := r.db.Query(query, searchTerm, searchTerm, models.EventStatusPublished, models.EventStatusSaleActive, limit)
+
+	err := database.NewBuilder(r.db, r.grammar).
+		Table("events").
+		WhereNull("deleted_at").
+		Where("name", "LIKE", searchTerm).
+		OrWhere("description", "LIKE", searchTerm).
+		WhereIn("status", []interface{}{models.EventStatusPublished, models.EventStatusSaleActive}).
+		OrderBy("start_time", "ASC").
+		Limit(limit).
+		Get(&events)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to search events: %w", err)
-	}
-	defer rows.Close()
-
-	events := []*models.Event{}
-	for rows.Next() {
-		event := &models.Event{}
-		err := rows.Scan(
-			&event.ID, &event.Name, &event.Description, &event.Type, &event.Status,
-			&event.VenueID, &event.StartTime, &event.EndTime, &event.BasePrice,
-			&event.TotalCapacity, &event.AvailableSeats, &event.ImageURL,
-			&event.Featured, &event.Metadata, &event.CreatedAt, &event.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan event: %w", err)
-		}
-		events = append(events, event)
 	}
 
 	return events, nil
